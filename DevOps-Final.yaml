@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This is DevOps assignment demo with a Banking application with DynamoDB, Lambda, and API Gateway 
+
+Parameters:
+  ElementName1:
+    Type: String
+    Default: "name"
+    Description: "Attribute name for Element 1"
+    
+  ElementType1:
+    Type: String
+    Default: "S"
+    Description: "Attribute type for Element 1"
+    
+  ElementName2:
+    Type: String
+    Default: "accountNumber"
+    Description: "Attribute name for Element 2"
+    
+  ElementType2:
+    Type: String
+    Default: "N"
+    Description: "Attribute type for Element 2"
+    
+Resources:
+  DynamoDB:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      TableName: "devopsdynamodb"
+      AttributeDefinitions:
+        - AttributeName: !Ref ElementName1
+          AttributeType: !Ref ElementType1
+        - AttributeName: !Ref ElementName2
+          AttributeType: !Ref ElementType2
+      KeySchema:
+        - AttributeName: !Ref ElementName2
+          KeyType: "HASH"
+        - AttributeName: !Ref ElementName1
+          KeyType: "RANGE" 
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+            
+  LambadaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+        AssumeRolePolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+                - Effect: Allow
+                  Principal:
+                      Service:
+                          - lambda.amazonaws.com
+                  Action:
+                      - 'sts:AssumeRole'
+        Description: IAM role config for lambda to access DynamoDB
+        ManagedPolicyArns: 
+            - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        RoleName: LambadaexecutionRole
+          
+  LambdaFunction:
+    DependsOn: LambadaExecutionRole
+    Type: AWS::Lambda::Function
+    Properties:
+        Runtime: python3.9
+        Role: !GetAtt LambadaExecutionRole.Arn
+        Handler: index.lambda_handler
+        Code:
+            ZipFile: |
+                import json
+                import boto3
+                client = boto3.client('dynamodb')
+                
+                def lambda_handler(event, context):
+                    response = client.get_item(
+                        TableName='devopsdynamodb',
+                        Key={'accountNumber': {'N': '56789'}},
+                        ProjectionExpression='name, accountNumber'
+                    )
+                    item = response.get('Item')
+                        if item:
+                            name = item.get('name', {}).get('S')
+                            account_number = item.get('accountNumber', {}).get('N')
+                            return {
+                                'statusCode': 200,
+                                'body': {
+                                    'name': name,
+                                    'accountNumber': account_number
+                                }
+                            }
+                        else:
+                            return {
+                                'statusCode': 404,
+                                'body': 'Item not found'
+                            }
+
+        Description: API Gateway Lambda DynmoDB
+        Timeout: 60
+            
+  InitializeDynamoDB:
+    Type: Custom::InitFunction
+    DependsOn: DynamoDB
+    Properties:
+      ServiceToken:
+         Fn::GetAtt: [ InitFunction , "Arn" ]
+      DynamoTableName:
+        Ref: DynamoDB   
+            
+  InitFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: >
+          const AWS = require("aws-sdk");
+          const response = require("cfn-response");
+          const docClient = new AWS.DynamoDB.DocumentClient();
+          exports.handler = function(event, context) {
+              console.log(JSON.stringify(event,null,2));
+              var params = {
+                TableName: event.ResourceProperties.DynamoTableName,
+                Item:{
+                    "name": "John Doe"
+                    "accountNumber": 56789
+                }
+            };
+          docClient.put(params, function(err, data) { if (err) {
+            response.send(event, context, "FAILED", {});
+          } else {
+            response.send(event, context, "SUCCESS", {});
+          }
+          });
+          };
+      Handler: index.handler
+      Role:
+        Fn::GetAtt: [ LambadaExecutionRole , "Arn" ]
+      Runtime: nodejs18.x
+      Timeout: 60 
+            
+  bankingRESTAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+        Name: balancestatusapi
+            
+  bankingstatusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+        ParentId: !GetAtt bankingRESTAPI.RootResourceId
+        PathPart: balanceStatus01
+        RestApiId: !Ref bankingRESTAPI
+            
+  bankingstatusMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+        RestApiId: !Ref bankingRESTAPI
+        ResourceId: !Ref bankingstatusResource 
+        HttpMethod: GET
+        MethodResponses :
+            - StatusCode : 200
+        AuthorizationType: NONE
+        Integration:
+          Type: AWS
+          IntegrationResponses:
+            - StatusCode : 200
+          IntegrationHttpMethod: POST
+          Uri: !Sub 'arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations'
+              
+  APIDeployment:
+    DependsOn: bankingstatusMethod
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+        RestApiId: !Ref bankingRESTAPI
+        Description: My deployment to Prod
+        StageName: Prod
+            
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+        FunctionName: !Ref LambdaFunction
+        Action: lambda:InvokeFunction
+        Principal: apigateway.amazonaws.com
+        SourceAccount: 296698127591
